@@ -1,28 +1,33 @@
 <template>
+  <span v-if="this.connectedAddress != false"><strong>Connected Address <br />{{this.connectedAddress}}</strong></span>
   <h1>Timelock MastherChef Caller &#128512;</h1>
+  <hr />
+  
+  <button @click="exportState">Export state</button>
+  <input type="text" placeholder="Previous state..." v-model="importStateData" /> 
+  <button @click="importState">Import state</button>
 
   <h2>Timelock configuration</h2>
   <div class="container">
-    <lable>Timelock contract: </lable>
+    <label>Timelock contract </label>
     <input type="text" v-model="timelockAddress"/>
     
-    <lable>MasterChefV2 contract: </lable>
+    <label>MasterChefV2 contract </label>
     <input type="text" v-model="masterChefAddress"/>
 
-    <lable>Gas Limit: </lable>
+    <label>Gas Limit </label>
     <input type="text" v-model="gasLimit"/>
 
-    <lable>Value  (as string, eg: 0.5): </lable>
+    <label>Value  (as string, eg: 0.5) </label>
     <input type="text" v-model="value"/>
 
-    <lable>ETA (timestamp - BSC new block minted every 3s approx): </lable>
-    <input type="text" v-model="timestamp"/>
+    <label>ETA (timestamp - BSC new block minted every 3s approx) </label>
+    <input type="text" v-model="timestamp" readonly/>
+    <button @click="updateEta(6)">now + 6 hours</button>
   </div>
 
   <h2>Masterchef function</h2>
-
   <br />
-
   <div class="container">
     <select name="function" v-model="functionToCall">
       <option
@@ -44,10 +49,11 @@
         function parameters
       </h2>
       <div v-for="param in functionParams[functionToCall]" :key="param.name">
-        <lable>{{ param.type }} | {{ param.name }}</lable>
+        <label>{{ param.type }} | {{ param.name }}</label>
         <input type="" v-model="param.val" />
       </div>
-      <button v-on:click="sendBlockchain">Send Transaction</button>
+      <button v-on:click="queueTransaction">Queue Transaction</button>
+      <button v-on:click="executeTransaction">Execute Transaction</button>
     </div>
   </div>
 </template>
@@ -56,12 +62,25 @@
 const { ethers } = require("ethers");
 const Timelock = require("./abi/Timelock.json");
 const MasterChefV2 = require("./abi/MasterChefV2.json");
-const provider = new ethers.providers.JsonRpcProvider("http://localhost:7545");
+const provider = new ethers.providers.JsonRpcProvider(window.ethereum);
 
 export default {
   name: "App",
   components: {},
-  beforeMount: function() {
+  beforeMount: async function() {
+    await window.ethereum.enable()
+  
+    this.provider = new ethers.providers.Web3Provider(window.ethereum);
+    this.signer = this.provider.getSigner();
+    this.connectedAddress = await this.signer.getAddress();
+    
+    const timeLock = new ethers.Contract(
+        this.timelockAddress,
+        Timelock.abi,
+        provider
+    );
+    this.timeLockWithSigner = timeLock.connect(this.signer);
+
     for (let obj in MasterChefV2.abi) {
       const entry = MasterChefV2.abi[obj];
       if (
@@ -76,6 +95,10 @@ export default {
   },
   data: () => {
     return {
+      timeLockWithSigner: false,
+      connectedAddress: false,
+      provider: false,
+      signer: false,
       gasLimit: 6721975,
       value: 0,
       functionParams: {
@@ -84,14 +107,43 @@ export default {
       },
       functionDescription: {
         add: "Add a new staking/farming pool to masterchef",
+        updateEmissionRate: "Tokens minted per block"
       },
       functionToCall: "",
-      timelockAddress: "0x33bDf05A756c413595da9f4F5Be49953BCE641c1",
-      masterChefAddress: "0x9Df2D690953B373F027549D6B245551381e9dbF0",
-      timestamp: 1,
+      timelockAddress: "0xE3c56475C0B5be384E660A13f6168A6d6eb79c5C",
+      masterChefAddress: "0x83A1B359C7559eC0225e7b6436cA124EB5F85b5A",
+      timestamp: 0,
+      importStateData: "",
     };
   },
   methods: {
+    exportState: function() {
+      console.log(JSON.stringify({
+        gasLimit: this.gasLimit,
+        value: this.value,
+        functionParams: this.functionParams,
+        functionToCall: this.functionToCall,
+        timelockAddress: this.timelockAddress,
+        masterChefAddress: this.masterChefAddress,
+        timestamp: this.timestamp
+      }));
+    },
+
+    importState: function() {
+      const state = JSON.parse(this.importStateData);
+      this.gasLimit = state.gasLimit;
+      this.value = state.value;
+      this.functionParams = state.functionParams;
+      this.functionToCall = state.functionToCall;
+      this.timelockAddress = state.timelockAddress;
+      this.masterChefAddress = state.masterChefAddress;
+      this.timestamp = state.timestamp;
+    },
+
+    updateEta: function(time) {
+      this.timestamp = Date.now() + (time*60);
+    },
+
     joinMethodParamSignature: function(name, params) {
       let signature = name + "(";
 
@@ -99,37 +151,37 @@ export default {
         let p = params[param];
         signature += p.type + " " + p.name + ", ";
       }
-
+      signature += ");"
       return signature;
     },
 
-    sendBlockchain: async function() {
-      const signer0 = provider.getSigner(0);
-
-      const overrides = {
-        // To convert Ether to Wei:
-        value: ethers.utils.parseEther("0.5"), // ether in this case MUST be a string
-        gasLimit: 6721975,
-      };
-
-      const timeLock = new ethers.Contract(
-        this.timelockAddress,
-        Timelock.abi,
-        provider
-      );
-      const timeLockWithSigner = timeLock.connect(signer0);
-
+    joinFunctionParametersAndGetEncodedBytes: function(functionToCall) {
       let iface = new ethers.utils.Interface(MasterChefV2.abi);
       let params = [];
 
-      //@todo: update
       for (let key in this.functionParams[this.functionToCall]) {
         const p = this.functionParams[this.functionToCall][key];
+        
+        if (p.type === "bool") {
+          p.val = (p.val === "true");
+        }
+
         params.push(p.val);
       }
 
-      let bytes = iface.encodeFunctionData("add", params);
-      let tx = await timeLockWithSigner.executeTransaction(
+      return iface.encodeFunctionData(functionToCall, params);
+    },
+    
+    queueTransaction: async function() {
+      const overrides = {
+        // To convert Ether to Wei:
+        //value: ethers.utils.parseEther("0.5"), // ether in this case MUST be a string
+        gasLimit: 6721975,
+      };
+
+      const bytes = this.joinFunctionParametersAndGetEncodedBytes(this.functionToCall);
+
+      let tx = await this.timeLockWithSigner.queueTransaction(
         this.masterChefAddress,
         0,
         '',
@@ -137,9 +189,31 @@ export default {
         this.timestamp,
         overrides
       );
+
       console.log(tx);
     },
-  },
+
+    executeTransaction: async function() {
+      const overrides = {
+        // To convert Ether to Wei:
+        value: ethers.utils.parseEther("0.5"), // ether in this case MUST be a string
+        gasLimit: 6721975,
+      };
+
+      const bytes = this.joinFunctionParametersAndGetEncodedBytes(this.functionToCall);
+
+      let tx = await this.timeLockWithSigner.executeTransaction(
+        this.masterChefAddress,
+        0,
+        '',
+        bytes,
+        this.timestamp,
+        overrides
+      );
+
+      console.log(tx);
+    },
+  }
 };
 </script>
 
